@@ -1,0 +1,11 @@
+torch
+torchvision
+transformers
+diffusers
+accelerate
+einops
+numpy
+pillow
+tqdm
+scipy
+flask
