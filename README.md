@@ -2,6 +2,11 @@
 
 HiDream-O1-Image is a natively unified image generative foundation model built on a Pixel-level Unified Transformer (UiT) without external VAEs or disjoint text encoders, which natively encodes raw pixels, text, and task-specific conditions in a single shared token space — supporting text-to-image, image editing, and subject-driven personalization at up to 2,048 × 2,048.
 
+## Project Updates
+
+- 📕 **May 10, 2026:** Our **technical report** is now available — [📑 HiDream-O1-Image.pdf](assets/HiDream-O1-Image.pdf).
+- 🚀 **May 8, 2026:** We've open-sourced **HiDream-O1-Image (8B)**, including both the undistilled and distilled Dev variants, together with the Reasoning-Driven Prompt Agent.
+
 > **HiDream-O1-Image (codename: Peanut) debuts at #8 in the Artificial Analysis Text to Image Arena, which is positioned to be the new leading open weights Text to Image model (2026-5-5).**
 <p align="center">
   <img src="assets/leaderboard.png" alt="Artificial Analysis Text to Image Arena" width="100%"/>
@@ -22,11 +27,6 @@ HiDream-O1-Image is a natively unified image generative foundation model built o
   <img src="assets/IP.webp" alt="Subject-driven personalization" width="100%"/>
   <br><sub><b>Subject-driven personalization</b> — preserve identity / IP across new scenes.</sub>
 </p>
-
-## Project Updates
-
-- 📄 **May 10, 2026:** Our **technical report** is now available — [HiDream-O1-Image.pdf](assets/HiDream-O1-Image.pdf).
-- 🚀 **May 8, 2026:** We've open-sourced **HiDream-O1-Image (8B)**, including both the undistilled and distilled Dev variants, together with the Reasoning-Driven Prompt Agent.
 
 ## Key Features
 

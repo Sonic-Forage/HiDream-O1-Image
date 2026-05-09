@@ -70,8 +70,9 @@ def _get_tokenizer(processor):
 def load_image_model(model_path):
     print(f"[app] Loading checkpoint from {model_path} ...")
     processor = AutoProcessor.from_pretrained(model_path)
+    # NOTE: torch_dtype = torch.float32 will generate more detailed images but with more memory usage
     model = Qwen3VLForConditionalGeneration.from_pretrained(
-        model_path, torch_dtype=torch.float32, device_map="cuda"
+        model_path, torch_dtype=torch.bfloat16, device_map="cuda"
     ).eval()
     _add_special_tokens(_get_tokenizer(processor))
     return processor, model

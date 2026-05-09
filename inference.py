@@ -45,8 +45,9 @@ def main():
     assert torch.cuda.is_available(), "CUDA is required for inference."
     print(f"[inference] Loading processor and model from {args.model_path}")
     processor = AutoProcessor.from_pretrained(args.model_path)
+    # NOTE: torch_dtype = torch.float32 will generate more detailed images but with more memory usage
     model = Qwen3VLForConditionalGeneration.from_pretrained(
-        args.model_path, torch_dtype=torch.float32, device_map="cuda"
+        args.model_path, torch_dtype=torch.bfloat16, device_map="cuda"
     ).eval()
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_image)), exist_ok=True)
