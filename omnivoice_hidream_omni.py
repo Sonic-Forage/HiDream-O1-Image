@@ -208,9 +208,9 @@ class OmniVoiceRunner:
         os.environ["PYTHONPATH"] = f"{repo_dir}:{os.environ.get('PYTHONPATH', '')}"
         sys.path.insert(0, repo_dir)
         vol.reload()
-        model_path = "/outputs/checkpoints/checkpoint-250"
+        model_path = "/outputs/checkpoints/checkpoint-1500"
         if not os.path.exists(model_path):
-            model_path = "k2-fsa/OmniVoice"
+            model_path = "TheMindExpansionNetwork/omnivoice-mindexpander-voice"
         print(f"🎤 Loading OmniVoice from {model_path}...")
         from omnivoice.models.omnivoice import OmniVoice
         self.model = OmniVoice.from_pretrained(model_path).to("cuda").eval()
