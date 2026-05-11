@@ -31,7 +31,7 @@ base_image = (
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "HF_HOME": "/cache/huggingface"})
 )
 
-# TTS image
+# TTS image — bake OmniVoice repo into image so no clone on cold start
 tts_image = (
     base_image
     .pip_install("torch==2.8.0", "torchaudio==2.8.0",
@@ -42,9 +42,11 @@ tts_image = (
                  "snac", "descript-audio-codec")
     .add_local_dir("/opt/data/workspace/M1ND3XPAND3RS-VOICE-VoxCPM-ready",
                    remote_path="/dataset", copy=True)
+    # Pre-clone OmniVoice repo — saves ~15s on every cold start
+    .run_commands("git clone --depth 1 https://github.com/k2-fsa/OmniVoice.git /workspace/OmniVoice")
 )
 
-# Image gen image (CUDA devel for flash-attn)
+# Image gen image — bake HiDream repo into image
 image_gen_image = (
     modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "ffmpeg", "libsndfile1", "libgl1-mesa-glx", "libglib2.0-0")
@@ -56,6 +58,8 @@ image_gen_image = (
                  "huggingface_hub", "hf_transfer", "safetensors", "qwen-vl-utils")
     .run_commands("pip install flash-attn --no-build-isolation")
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "HF_HOME": "/cache/huggingface"})
+    # Pre-clone HiDream repo — saves ~10s on every cold start
+    .run_commands("git clone --depth 1 https://github.com/HiDream-ai/HiDream-O1-Image.git /workspace/HiDream-O1-Image")
 )
 
 # Brain image — just needs OpenAI client for API calls
@@ -123,14 +127,12 @@ class QwenBrain:
         content = re.sub(r"^\d+\.\s+\*\*.*?\*\*:.*?\n", "", content, flags=re.MULTILINE).strip()
         # If still mostly thinking, try to extract the actual content
         if len(content) > 500 and any(w in content.lower() for w in ["brainstorm", "draft", "attempt", "syllable"]):
-            # Try to find the actual haiku/poem after all the thinking
             lines = content.split("\n")
-            # Find lines that look like creative content (short, poetic)
             creative = [l for l in lines if l.strip() and len(l.strip()) < 80
                         and not l.strip().startswith(("*", "-", "1.", "2.", "3.", "4.", "5."))
                         and not any(w in l.lower() for w in ["brainstorm", "draft", "attempt", "syllable", "analyze", "deconstruct"])]
             if creative:
-                content = "\n".join(creative[-10:])  # Take last 10 creative lines
+                content = "\n".join(creative[-10:])
         return content
 
     @modal.method()
@@ -201,12 +203,13 @@ class OmniVoiceRunner:
 
     @modal.enter()
     def load_model(self):
-        import subprocess, os, sys
+        import os, sys
+
+        # OmniVoice repo is pre-baked into the image at /workspace/OmniVoice
         repo_dir = "/workspace/OmniVoice"
-        if not os.path.exists(repo_dir):
-            subprocess.run(["git", "clone", "https://github.com/k2-fsa/OmniVoice.git", repo_dir], check=True)
         os.environ["PYTHONPATH"] = f"{repo_dir}:{os.environ.get('PYTHONPATH', '')}"
         sys.path.insert(0, repo_dir)
+
         vol.reload()
         model_path = "/outputs/checkpoints/checkpoint-1500"
         if not os.path.exists(model_path):
@@ -221,7 +224,7 @@ class OmniVoiceRunner:
         if os.path.exists(txt_file):
             with open(txt_file) as f:
                 self.default_ref_text = f.read().strip()
-        print("✅ OmniVoice loaded!")
+        print(f"✅ OmniVoice loaded: {model_path}")
 
     @modal.method()
     def generate(self, text: str, ref_audio: str = None, ref_text: str = None,
@@ -268,21 +271,24 @@ class HiDreamRunner:
 
     @modal.enter()
     def load_model(self):
-        import os, sys, torch
+        import os, sys, torch, warnings
         from transformers import AutoProcessor
+
+        # Suppress docstring warnings from HiDream's custom model code
+        warnings.filterwarnings("ignore", message=".*is part of.*signature.*not documented.*")
+        warnings.filterwarnings("ignore", message=".*torch_dtype is deprecated.*")
+
+        # HiDream repo is pre-baked into the image at /workspace/HiDream-O1-Image
         repo_dir = "/workspace/HiDream-O1-Image"
-        if not os.path.exists(repo_dir):
-            import subprocess
-            subprocess.run(["git", "clone", "--depth", "1",
-                           "https://github.com/HiDream-ai/HiDream-O1-Image.git", repo_dir], check=True)
         sys.path.insert(0, repo_dir)
         os.chdir(repo_dir)
+
         model_path = "HiDream-ai/HiDream-O1-Image-Dev"
         print(f"🎨 Loading {model_path}...")
         from models.qwen3_vl_transformers import Qwen3VLForConditionalGeneration
         self.processor = AutoProcessor.from_pretrained(model_path)
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_path, torch_dtype=torch.bfloat16, device_map="cuda"
+            model_path, dtype=torch.bfloat16, device_map="cuda"
         ).eval()
         tokenizer = self.processor.tokenizer
         for attr, val in [("boi_token", "<|boi_token|>"), ("bor_token", "<|bor_token|>"),
@@ -323,7 +329,8 @@ def _create_web_app(brain_cls, tts_cls, img_cls):
     async def health():
         return {"status": "ok", "services": {
             "brain": {"model": "Qwen3.6-27B via OpenRouter", "role": "creative writing + prompt engineering"},
-            "tts": {"model": "OmniVoice (checkpoint-250)", "voice": "MindExpander clone"},
+            "tts": {"model": "OmniVoice (checkpoint-1500)", "voice": "MindExpander clone",
+                    "endpoint": "TheMindExpansionNetwork/omnivoice-mindexpander-voice"},
             "image": {"model": "HiDream-O1-Image-Dev", "max_resolution": "2048x2048"},
         }}
 
