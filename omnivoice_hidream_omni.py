@@ -1,8 +1,8 @@
 """
-MindForge Omni v2 — Full Creative AI Stack with Qwen3.6-27B Brain.
+MindForge Omni v2 — Full Creative AI Stack.
 
-Three GPU classes:
-  - QwenBrain (A10G) — Qwen3.6-27B AWQ: creative writing, prompt engineering
+Three services:
+  - QwenBrain (CPU) — Qwen3.6-27B via OpenRouter API: creative writing, prompt engineering
   - OmniVoiceRunner (A10G) — TTS with MindExpander's cloned voice
   - HiDreamRunner (A10G) — Image generation up to 2048x2048
 
@@ -58,12 +58,10 @@ image_gen_image = (
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "HF_HOME": "/cache/huggingface"})
 )
 
-# Brain image — vLLM for Qwen3.6-27B
+# Brain image — just needs OpenAI client for API calls
 brain_image = (
-    base_image
-    .pip_install("torch==2.8.0", extra_index_url="https://download.pytorch.org/whl/cu128")
-    .pip_install("vllm", "openai", "huggingface_hub", "hf_transfer")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "HF_HOME": "/cache/huggingface"})
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install("openai", "httpx")
 )
 
 # CPU ASGI
@@ -76,133 +74,113 @@ app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(MODEL_VOLUME, create_if_missing=True)
 hf_cache = modal.Volume.from_name(HF_CACHE_VOLUME, create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
+openrouter_secret = modal.Secret.from_name("openrouter-secret")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# GPU Class 1: Qwen3.6-27B Brain (A10G, AWQ quantized)
+# CPU Class 1: QwenBrain — Qwen3.6-27B via OpenRouter API
 # ══════════════════════════════════════════════════════════════════════
 @app.cls(
     image=brain_image,
-    gpu="A10G",
-    volumes={"/cache": hf_cache},
-    secrets=[hf_secret],
-    scaledown_window=300,
-    timeout=1200,
+    cpu=0.5,
+    memory=512,
+    secrets=[openrouter_secret],
+    scaledown_window=60,
+    timeout=120,
     max_containers=1,
-    startup_timeout=900,
 )
-@modal.concurrent(max_inputs=4)
+@modal.concurrent(max_inputs=8)
 class QwenBrain:
-    """Qwen3.6-27B — creative writing, prompt engineering, reasoning."""
+    """Qwen3.6-27B via OpenRouter — creative writing, prompt engineering."""
 
     @modal.enter()
-    def load_model(self):
-        import subprocess, os
-
-        print("🧠 Starting Qwen3.6-27B via vLLM...")
-        # Use AWQ quantized model for A10G (24GB)
-        self.model_id = "cyankiwi/Qwen3.6-27B-AWQ-INT4"
-
-        # Start vLLM server in background
-        env = os.environ.copy()
-        env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
-        self.proc = subprocess.Popen(
-            [
-                "vllm", "serve", self.model_id,
-                "--port", "8000",
-                "--quantization", "awq",
-                "--max-model-len", "8192",
-                "--gpu-memory-utilization", "0.90",
-                "--trust-remote-code",
-                "--dtype", "auto",
-            ],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-
-        # Wait for server to be ready
-        import time, httpx
-        print("⏳ Waiting for vLLM server (first start downloads ~14GB model)...")
-        for i in range(180):  # 15 min max
-            time.sleep(5)
-            try:
-                r = httpx.get("http://localhost:8000/health", timeout=2)
-                if r.status_code == 200:
-                    print("✅ Qwen3.6-27B vLLM server ready!")
-                    break
-            except Exception:
-                if i % 6 == 0:
-                    print(f"   Still waiting... ({i*5}s)")
-
+    def setup(self):
+        import os
         from openai import OpenAI
-        self.client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
-        print(f"✅ Brain loaded: {self.model_id}")
+        self.client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ.get("OPENROUTER_API_KEY"),
+        )
+        self.model = "qwen/qwen3.6-27b"
+        print(f"✅ Brain connected: {self.model} via OpenRouter")
 
     @modal.method()
     def chat(self, messages: list, max_tokens: int = 2048, temperature: float = 0.7) -> str:
-        """Chat completion — returns response text."""
+        import re
         response = self.client.chat.completions.create(
-            model=self.model_id,
+            model=self.model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
+            extra_body={"enable_thinking": False},
         )
-        return response.choices[0].message.content or ""
+        content = response.choices[0].message.content or ""
+        # Strip thinking tags
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        # Strip "Thinking Process:" blocks (Qwen3.6 without tags)
+        content = re.sub(r"Thinking Process:.*?(?=\n\n[A-Z]|\n\n\*\*|\n\n[^\*])", "", content, flags=re.DOTALL).strip()
+        # Strip numbered reasoning steps
+        content = re.sub(r"^\d+\.\s+\*\*.*?\*\*:.*?\n", "", content, flags=re.MULTILINE).strip()
+        # If still mostly thinking, try to extract the actual content
+        if len(content) > 500 and any(w in content.lower() for w in ["brainstorm", "draft", "attempt", "syllable"]):
+            # Try to find the actual haiku/poem after all the thinking
+            lines = content.split("\n")
+            # Find lines that look like creative content (short, poetic)
+            creative = [l for l in lines if l.strip() and len(l.strip()) < 80
+                        and not l.strip().startswith(("*", "-", "1.", "2.", "3.", "4.", "5."))
+                        and not any(w in l.lower() for w in ["brainstorm", "draft", "attempt", "syllable", "analyze", "deconstruct"])]
+            if creative:
+                content = "\n".join(creative[-10:])  # Take last 10 creative lines
+        return content
 
     @modal.method()
     def write_poem(self, theme: str, style: str = "free verse") -> dict:
         """Write a poem and generate an optimized image prompt."""
-        result = self.chat([
+        import json, re
+        result = self.chat.local([
             {"role": "system", "content": """You are a creative AI that writes poems and generates image prompts.
 Given a theme and style, respond with ONLY a JSON object:
 {
   "poem": "the poem text",
   "title": "poem title",
-  "image_prompt": "detailed English prompt for image generation, 80-200 words, following SCALIST framework"
+  "image_prompt": "detailed English prompt for image generation, 80-200 words"
 }
 
 The image_prompt should be a detailed, self-contained description for an AI image generator.
-Include: subject, composition, action, location, image style, specs (camera/lens/lighting).
-Make it cinematic, vivid, and specific. No keywords — use full sentences."""},
+Include: subject, composition, action, location, image style, camera/lens/lighting specs.
+Make it cinematic, vivid, and specific. Use full sentences, not keywords."""},
             {"role": "user", "content": f"Theme: {theme}\nStyle: {style}"},
         ], temperature=0.9)
 
-        # Parse JSON
-        import json, re
+        text = result.strip()
         try:
-            # Try to extract JSON from response
-            text = result.strip()
             if "```" in text:
                 m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
                 if m:
                     text = m.group(1).strip()
-            # Find JSON block
             start = text.find("{")
             end = text.rfind("}") + 1
             if start >= 0 and end > start:
                 return json.loads(text[start:end])
         except Exception:
             pass
-
         return {
             "poem": result,
             "title": theme,
-            "image_prompt": f"cinematic illustration of {theme}, highly detailed, dramatic lighting, 8k masterpiece",
+            "image_prompt": f"cinematic illustration of {style}, {theme}, highly detailed, dramatic lighting, 8k masterpiece",
         }
 
     @modal.method()
     def enhance_prompt(self, user_prompt: str) -> str:
         """Enhance a user prompt into an optimized image generation prompt."""
-        result = self.chat([
+        return self.chat.local([
             {"role": "system", "content": """You are an expert AI image prompt engineer.
 Rewrite the user's request into a detailed, self-contained English prompt for image generation.
-Follow the SCALIST framework: Subject, Composition, Action, Location, Image style, Specs, Text rendering.
+Include: subject details, composition, lighting, camera angle, art style, color palette.
 Output ONLY the enhanced prompt — no explanations, no JSON, just the prompt text.
-Length: 80-200 words. Use full sentences, not keywords."""},
+Length: 80-200 words. Use full sentences."""},
             {"role": "user", "content": user_prompt},
-        ], max_tokens=512, temperature=0.7)
-        return result.strip()
+        ], max_tokens=512, temperature=0.7).strip()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -243,7 +221,7 @@ class OmniVoiceRunner:
         if os.path.exists(txt_file):
             with open(txt_file) as f:
                 self.default_ref_text = f.read().strip()
-        print(f"✅ OmniVoice loaded!")
+        print("✅ OmniVoice loaded!")
 
     @modal.method()
     def generate(self, text: str, ref_audio: str = None, ref_text: str = None,
@@ -315,8 +293,7 @@ class HiDreamRunner:
         print("✅ HiDream loaded!")
 
     @modal.method()
-    def generate(self, prompt: str, width: int = 2048, height: int = 2048,
-                 seed: int = 42) -> bytes:
+    def generate(self, prompt: str, width: int = 2048, height: int = 2048, seed: int = 42) -> bytes:
         import io, sys, os
         os.chdir(self.repo_dir)
         sys.path.insert(0, self.repo_dir)
@@ -345,7 +322,7 @@ def _create_web_app(brain_cls, tts_cls, img_cls):
     @web.get("/health")
     async def health():
         return {"status": "ok", "services": {
-            "brain": {"model": "Qwen3.6-27B-AWQ-INT4", "role": "creative writing + prompt engineering"},
+            "brain": {"model": "Qwen3.6-27B via OpenRouter", "role": "creative writing + prompt engineering"},
             "tts": {"model": "OmniVoice (checkpoint-250)", "voice": "MindExpander clone"},
             "image": {"model": "HiDream-O1-Image-Dev", "max_resolution": "2048x2048"},
         }}
@@ -358,7 +335,7 @@ def _create_web_app(brain_cls, tts_cls, img_cls):
         result = await runner.generate.remote.aio(text=text, num_step=num_step, guidance_scale=guidance_scale)
         return Response(content=base64.b64decode(result["audio_base64"]), media_type="audio/wav")
 
-    # ── Image (with optional auto prompt enhancement) ──
+    # ── Image (with auto prompt enhancement) ──
     @web.post("/v1/images/generations")
     async def image_gen(prompt: str = Body(..., embed=True), size: str = Body("2048x2048", embed=True),
                        seed: int = Body(42, embed=True), enhance: bool = Body(True, embed=True)):
@@ -388,8 +365,6 @@ def _create_web_app(brain_cls, tts_cls, img_cls):
         request: str = Body("Write a poem about the cosmos and illustrate it", embed=True),
         style: str = Body("cinematic cyberpunk", embed=True),
     ):
-        """Full creative pipeline: QwenBrain → OmniVoice + HiDream in parallel."""
-        # Step 1: Brain writes poem + image prompt
         brain = brain_cls()
         creation = await brain.write_poem.remote.aio(theme=request, style=style)
 
@@ -397,7 +372,6 @@ def _create_web_app(brain_cls, tts_cls, img_cls):
         image_prompt = creation.get("image_prompt",
             f"{style} illustration, {request}, highly detailed, dramatic lighting, 8k masterpiece")
 
-        # Step 2: Voice + Image in parallel
         tts_runner = tts_cls()
         img_runner = img_cls()
 
